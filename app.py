@@ -521,6 +521,7 @@ col_meid = find_column(df, ["meid"])
 col_delivery = find_column(df, ["delivery number"])
 col_lane = find_column(df, ["lane"])
 col_cust = find_column(df, ["destination name view"])
+col_mode_type = find_column(df, ["mode_type", "mode type"])
 
 required_missing = [n for n, c in [
     ("destination city", col_city),
@@ -548,6 +549,7 @@ st.markdown(
     MEID: <b>{col_meid or "(not found)"}</b><br/>
     Delivery Number: <b>{col_delivery or "(not found)"}</b><br/>
     Lane: <b>{col_lane or "(not found)"}</b><br/>
+    Mode Type: <b>{col_mode_type or "(not found)"}</b><br/>
     Customer Name: <b>{col_cust or "(not found)"}</b><br/>
   </div>
 </div>
@@ -608,20 +610,46 @@ else:
 now_ts = pd.Timestamp(now_naive_local())
 
 work["Passed_CRDD"] = work["_CRDD_DT"].notna() & (now_ts > work["_CRDD_DT"])
+if col_mode_type and col_mode_type in work.columns:
+    mode_is_ltl = work[col_mode_type].astype(str).str.strip().str.upper().eq("LTL")
+else:
+    mode_is_ltl = pd.Series(False, index=work.index)
+work["LTL_Weekend_Risk"] = (
+    mode_is_ltl
+    & work["_CRDD_DT"].notna()
+    & work["_CRDD_DT"].dt.dayofweek.isin([5, 6])
+)
 # Per your rule: compare DATE only (ignore time-of-day).
 # Same calendar day as CRDD is on-time; only later day is late.
 work["_CRDD_DATE"] = work["_CRDD_DT"].dt.date
 work["_ACTUAL_DEL_DATE"] = work["_ACTUAL_DEL_DT"].dt.date
-work["Danger_Missed_CRDD"] = (
+work["_ON_TIME_TO_CRDD"] = (
     work["_CRDD_DATE"].notna()
     & work["_ACTUAL_DEL_DATE"].notna()
-    & (work["_ACTUAL_DEL_DATE"] > work["_CRDD_DATE"])
+    & (work["_ACTUAL_DEL_DATE"] <= work["_CRDD_DATE"])
+)
+work["Danger_Missed_CRDD"] = (
+    (
+        # No POD and CRDD already passed.
+        work["Passed_CRDD"] & work["_ACTUAL_DEL_DT"].isna()
+    )
+    |
+    (
+        # Delivered after CRDD date.
+        work["_CRDD_DATE"].notna()
+        & work["_ACTUAL_DEL_DATE"].notna()
+        & (work["_ACTUAL_DEL_DATE"] > work["_CRDD_DATE"])
+    )
 )
 
-m1, m2, m3 = st.columns(3)
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total Loads", f"{len(work):,}")
 m2.metric("Passed CRDD (NOW > CRDD)", f"{int(work['Passed_CRDD'].sum()):,}")
-m3.metric("Danger_missed_CRDD (Actual Date > CRDD Date)", f"{int(work['Danger_Missed_CRDD'].sum()):,}")
+m3.metric(
+    "Danger_missed_CRDD (No POD after CRDD OR delivered after CRDD date)",
+    f"{int(work['Danger_Missed_CRDD'].sum()):,}",
+)
+m4.metric("LTL - weekend delivery risk", f"{int(work['LTL_Weekend_Risk'].sum()):,}")
 st.write("")
 
 
@@ -741,6 +769,10 @@ st.header("6) Results")
 def risk_label(row):
     if bool(row.get("Danger_Missed_CRDD", False)):
         return "DANGER: missed CRDD"
+    if bool(row.get("LTL_Weekend_Risk", False)):
+        return "LTL - weekend delivery"
+    if bool(row.get("_ON_TIME_TO_CRDD", False)):
+        return "On-time: met CRDD"
     if bool(row.get("Passed_CRDD", False)):
         return "Late: passed CRDD"
     if bool(row.get("Weather_Risk", False)):
@@ -750,11 +782,20 @@ def risk_label(row):
 out["Risk_Label"] = out.apply(risk_label, axis=1)
 
 display_cols = []
-for c in [col_meid, col_delivery, col_lane, col_cust, col_city, col_state, col_postal, col_crdd, col_actual_del]:
+for c in [col_meid, col_delivery, col_lane, col_mode_type, col_cust, col_city, col_state, col_postal, col_crdd, col_actual_del]:
     if c and c in out.columns:
         display_cols.append(c)
 
-display_cols += ["Passed_CRDD", "Danger_Missed_CRDD", "Weather_Risk", "Weather_Reason", "Window_Start", "Window_End", "Risk_Label"]
+display_cols += [
+    "Passed_CRDD",
+    "Danger_Missed_CRDD",
+    "LTL_Weekend_Risk",
+    "Weather_Risk",
+    "Weather_Reason",
+    "Window_Start",
+    "Window_End",
+    "Risk_Label",
+]
 display_df = out[display_cols].copy()
 
 def style_rows(df_):
@@ -762,6 +803,8 @@ def style_rows(df_):
         label = str(row.get("Risk_Label", ""))
         if "DANGER" in label:
             return ["background-color: rgba(255, 59, 48, 0.18)"] * len(row)
+        if "LTL - weekend delivery" in label:
+            return ["background-color: rgba(175, 82, 222, 0.16)"] * len(row)
         if "Late" in label:
             return ["background-color: rgba(255, 149, 0, 0.16)"] * len(row)
         if "Weather" in label:
