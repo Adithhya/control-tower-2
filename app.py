@@ -522,6 +522,27 @@ col_delivery = find_column(df, ["delivery number"])
 col_lane = find_column(df, ["lane"])
 col_cust = find_column(df, ["destination name view"])
 col_mode_type = find_column(df, ["mode_type", "mode type"])
+col_me_status = find_column(df, ["ME_STATUS", "ME STATUS", "me_status"])
+col_must_ship = find_column(
+    df,
+    [
+        "Must Ship By Date/Time",
+        "MUST_SHIP_BY_DATE_TIME",
+        "must ship by date/time",
+        "must_ship_by_date_time",
+        "must ship by date",
+    ],
+)
+col_actual_pickup = find_column(
+    df,
+    [
+        "Actual Pickup Date/Time",
+        "ACTUAL_PICKUP_DATE_TIME",
+        "actual pickup date/time",
+        "actual_pickup_date_time",
+        "actual pickup date",
+    ],
+)
 
 required_missing = [n for n, c in [
     ("destination city", col_city),
@@ -550,6 +571,9 @@ st.markdown(
     Delivery Number: <b>{col_delivery or "(not found)"}</b><br/>
     Lane: <b>{col_lane or "(not found)"}</b><br/>
     Mode Type: <b>{col_mode_type or "(not found)"}</b><br/>
+    ME Status: <b>{col_me_status or "(not found)"}</b><br/>
+    Must Ship By Date/Time: <b>{col_must_ship or "(not found)"}</b><br/>
+    Actual Pickup Date/Time: <b>{col_actual_pickup or "(not found)"}</b><br/>
     Customer Name: <b>{col_cust or "(not found)"}</b><br/>
   </div>
 </div>
@@ -654,9 +678,66 @@ st.write("")
 
 
 # =========================
-# 5) Weather risk (NOW -> CRDD) using POSTAL-FIRST geocoding
+# 5) In-Transit Status
 # =========================
-st.header("5) Weather Risk (NOW → CRDD)")
+st.header("5) In-Transit Status")
+
+if col_me_status:
+    status_norm = work[col_me_status].fillna("").astype(str).str.upper().str.strip()
+    work["_IN_TRANSIT"] = status_norm.str.replace("_", " ", regex=False).str.contains(
+        r"\bIN[\s\-]*TRANSIT\b", regex=True
+    )
+else:
+    work["_IN_TRANSIT"] = False
+
+if col_must_ship:
+    work["_MUST_SHIP_DT"] = parse_datetime_series(work[col_must_ship])
+else:
+    work["_MUST_SHIP_DT"] = pd.NaT
+
+if col_actual_pickup:
+    work["_ACTUAL_PICKUP_DT"] = parse_datetime_series(work[col_actual_pickup])
+else:
+    work["_ACTUAL_PICKUP_DT"] = pd.NaT
+
+work["_MUST_SHIP_DATE"] = work["_MUST_SHIP_DT"].dt.date
+work["_ACTUAL_PICKUP_DATE"] = work["_ACTUAL_PICKUP_DT"].dt.date
+
+# "much before / equal / greater" is implemented as date-only comparison.
+today_date = now_ts.date()
+in_transit_past_crdd = work["_IN_TRANSIT"] & work["_CRDD_DATE"].notna() & (today_date > work["_CRDD_DATE"])
+in_transit_before_crdd = work["_IN_TRANSIT"] & work["_CRDD_DATE"].notna() & (today_date < work["_CRDD_DATE"])
+pickup_dates_present = work["_MUST_SHIP_DATE"].notna() & work["_ACTUAL_PICKUP_DATE"].notna()
+
+cond_pickup_late = (
+    in_transit_before_crdd & pickup_dates_present & (work["_ACTUAL_PICKUP_DATE"] > work["_MUST_SHIP_DATE"])
+)
+cond_pickup_equal = (
+    in_transit_before_crdd & pickup_dates_present & (work["_ACTUAL_PICKUP_DATE"] == work["_MUST_SHIP_DATE"])
+)
+cond_pickup_early = (
+    in_transit_before_crdd & pickup_dates_present & (work["_ACTUAL_PICKUP_DATE"] < work["_MUST_SHIP_DATE"])
+)
+
+work["In_Transit_Status"] = ""
+work.loc[cond_pickup_late, "In_Transit_Status"] = "Picked up late In-Transit"
+work.loc[cond_pickup_equal, "In_Transit_Status"] = "Picked on time, In Transit"
+work.loc[cond_pickup_early, "In_Transit_Status"] = "Shipped on-time, In Transit"
+work.loc[in_transit_past_crdd, "In_Transit_Status"] = "Not delivered, past CRDD"
+
+c_it1, c_it2, c_it3, c_it4 = st.columns(4)
+c_it1.metric("Picked up late In-Transit", f"{int((work['In_Transit_Status'] == 'Picked up late In-Transit').sum()):,}")
+c_it2.metric("Picked on time, In Transit", f"{int((work['In_Transit_Status'] == 'Picked on time, In Transit').sum()):,}")
+c_it3.metric("Shipped on-time, In Transit", f"{int((work['In_Transit_Status'] == 'Shipped on-time, In Transit').sum()):,}")
+c_it4.metric("Not delivered, past CRDD", f"{int((work['In_Transit_Status'] == 'Not delivered, past CRDD').sum()):,}")
+st.caption("In-transit classification uses date-only comparisons (time ignored).")
+st.write("")
+
+
+# =========================
+# 6) Weather risk (NOW -> CRDD) using POSTAL-FIRST geocoding
+# =========================
+st.header("6) Weather Risk (NOW → CRDD)")
 
 dest = work[[col_city, col_state, col_postal, "_CRDD_DT"]].copy()
 dest.columns = ["_city", "_state", "_postal", "_crdd"]
@@ -762,11 +843,14 @@ with st.expander("Debug: weather reason counts", expanded=False):
 
 
 # =========================
-# 6) Results + color labels
+# 7) Results + color labels
 # =========================
-st.header("6) Results")
+st.header("7) Results")
 
 def risk_label(row):
+    in_transit_label = str(row.get("In_Transit_Status", "")).strip()
+    if in_transit_label:
+        return in_transit_label
     if bool(row.get("Danger_Missed_CRDD", False)):
         return "DANGER: missed CRDD"
     if bool(row.get("LTL_Weekend_Risk", False)):
@@ -782,7 +866,21 @@ def risk_label(row):
 out["Risk_Label"] = out.apply(risk_label, axis=1)
 
 display_cols = []
-for c in [col_meid, col_delivery, col_lane, col_mode_type, col_cust, col_city, col_state, col_postal, col_crdd, col_actual_del]:
+for c in [
+    col_meid,
+    col_delivery,
+    col_lane,
+    col_mode_type,
+    col_me_status,
+    col_must_ship,
+    col_actual_pickup,
+    col_cust,
+    col_city,
+    col_state,
+    col_postal,
+    col_crdd,
+    col_actual_del,
+]:
     if c and c in out.columns:
         display_cols.append(c)
 
@@ -790,6 +888,7 @@ display_cols += [
     "Passed_CRDD",
     "Danger_Missed_CRDD",
     "LTL_Weekend_Risk",
+    "In_Transit_Status",
     "Weather_Risk",
     "Weather_Reason",
     "Window_Start",
@@ -803,6 +902,8 @@ def style_rows(df_):
         label = str(row.get("Risk_Label", ""))
         if "DANGER" in label:
             return ["background-color: rgba(255, 59, 48, 0.18)"] * len(row)
+        if "In-Transit" in label or "In Transit" in label or "Not delivered, past CRDD" in label:
+            return ["background-color: rgba(175, 82, 222, 0.16)"] * len(row)
         if "LTL - weekend delivery" in label:
             return ["background-color: rgba(175, 82, 222, 0.16)"] * len(row)
         if "Late" in label:
@@ -818,9 +919,9 @@ st.write("")
 
 
 # =========================
-# 7) Download output (all original + flags)
+# 8) Download output (all original + flags)
 # =========================
-st.header("7) Download updated file")
+st.header("8) Download updated file")
 
 final_out = out.copy()
 csv_bytes = final_out.to_csv(index=False).encode("utf-8")
