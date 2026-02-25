@@ -722,13 +722,13 @@ cond_pickup_early = (
 work["In_Transit_Status"] = ""
 work.loc[cond_pickup_late, "In_Transit_Status"] = "Picked up late In-Transit"
 work.loc[cond_pickup_equal, "In_Transit_Status"] = "Picked on time, In Transit"
-work.loc[cond_pickup_early, "In_Transit_Status"] = "Shipped on-time, In Transit"
+work.loc[cond_pickup_early, "In_Transit_Status"] = "Shipped Early, In Transit"
 work.loc[in_transit_past_crdd, "In_Transit_Status"] = "Not delivered, past CRDD"
 
 c_it1, c_it2, c_it3, c_it4 = st.columns(4)
 c_it1.metric("Picked up late In-Transit", f"{int((work['In_Transit_Status'] == 'Picked up late In-Transit').sum()):,}")
 c_it2.metric("Picked on time, In Transit", f"{int((work['In_Transit_Status'] == 'Picked on time, In Transit').sum()):,}")
-c_it3.metric("Shipped on-time, In Transit", f"{int((work['In_Transit_Status'] == 'Shipped on-time, In Transit').sum()):,}")
+c_it3.metric("Shipped on-time, In Transit", f"{int((work['In_Transit_Status'] == 'Shipped Early, In Transit').sum()):,}")
 c_it4.metric("Not delivered, past CRDD", f"{int((work['In_Transit_Status'] == 'Not delivered, past CRDD').sum()):,}")
 st.caption("In-transit classification uses date-only comparisons (time ignored).")
 st.write("")
